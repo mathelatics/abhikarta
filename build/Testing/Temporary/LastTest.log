@@ -1,0 +1,51 @@
+Start testing: Oct 07 17:13 UTC
+----------------------------------------------------------
+1/3 Testing: session
+1/3 Test: session
+Command: "/workspace/build/test_session"
+Directory: /workspace/build
+"session" start time: Oct 07 17:13 UTC
+Output:
+----------------------------------------------------------
+test_session OK (tree/fork/branch/usage roundtrip)
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"session" end time: Oct 07 17:13 UTC
+"session" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/3 Testing: tools
+2/3 Test: tools
+Command: "/workspace/build/test_tools"
+Directory: /workspace/build
+"tools" start time: Oct 07 17:13 UTC
+Output:
+----------------------------------------------------------
+test_tools OK (r/b/e/w + read-only allowlist)
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"tools" end time: Oct 07 17:13 UTC
+"tools" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/3 Testing: loop_offline
+3/3 Test: loop_offline
+Command: "/workspace/build/test_loop_offline"
+Directory: /workspace/build
+"loop_offline" start time: Oct 07 17:13 UTC
+Output:
+----------------------------------------------------------
+Sure. File created.File created.test_loop_offline OK (SSE stream + tool loop + persist + auto-compaction)
+<end of output>
+Test time =   0.31 sec
+----------------------------------------------------------
+Test Passed.
+"loop_offline" end time: Oct 07 17:13 UTC
+"loop_offline" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 07 17:13 UTC
