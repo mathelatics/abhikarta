@@ -1,5 +1,11 @@
-(empty)node_modules/
-.next/
-dist/
+# Build directories
 build/
-*.log
+
+# Compiled object files
+*.o
+*.obj
+
+# CMake specific artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake

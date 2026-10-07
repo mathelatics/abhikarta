@@ -146,7 +146,7 @@ public:
     });
 
     if (!res) { r.error = "HTTP request failed: " + httplib::to_string(res.error()); return r; }
-    if (res->status >= 400) { r.error = "HTTP " + std::to_string(res.status) + ": " + res->body; return r; }
+    if (res->status >= 400) { r.error = "HTTP " + std::to_string(res->status) + ": " + res->body; return r; }
 
     r.text = acc.text;
     for (auto& [idx, tc] : acc.tcs) {

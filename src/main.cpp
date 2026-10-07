@@ -4,6 +4,7 @@
 #include "core/agent.hpp"
 #include "core/skills.hpp"
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <thread>
 
@@ -60,7 +61,30 @@ int main(int argc, char** argv) {
   if (o.model.empty()) {
     const char* e = getenv("PI_MODEL");
     o.model = e ? e : (o.base_url.find("nvidia") != std::string::npos
-                       ? "meta/llama-3.1-70b-instruct" : "local-model");
+                       ? "openai/gpt-oss-20b" : "local-model");
+  }
+
+  // ~/.pi_agent.env — user-local config/key file (chmod 600, never committed).
+  // Loaded last so flags still win; env vars already set take precedence.
+  if (const char* home = getenv("HOME")) {
+    std::string envf = std::string(home) + "/.pi_agent.env";
+    std::ifstream ef(envf);
+    std::string ln;
+    while (std::getline(ef, ln)) {
+      if (ln.empty() || ln[0] == '#') continue;
+      auto eq = ln.find('='); if (eq == std::string::npos) continue;
+      std::string k = ln.substr(0, eq), v = ln.substr(eq + 1);
+      if (!getenv(k.c_str())) setenv(k.c_str(), v.c_str(), 0);
+    }
+    if (o.api_key.empty()) {
+      if (const char* e = getenv("PI_API_KEY")) o.api_key = e;
+      else if (const char* e = getenv("NVIDIA_API_KEY")) o.api_key = e;
+    }
+    if (o.base_url.empty() || o.base_url == "http://localhost:1234/v1") {
+      if (const char* e = getenv("PI_BASE_URL")) o.base_url = e;
+    }
+    if (getenv("PI_MODEL") && (o.model == "local-model" || o.model == "meta/llama-3.1-70b-instruct"))
+      o.model = getenv("PI_MODEL");
   }
 
   char cwdbuf[4096]; if (getcwd(cwdbuf, sizeof cwdbuf)); 

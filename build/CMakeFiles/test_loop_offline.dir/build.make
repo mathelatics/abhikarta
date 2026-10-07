@@ -92,6 +92,8 @@ test_loop_offline_EXTERNAL_OBJECTS =
 
 test_loop_offline: CMakeFiles/test_loop_offline.dir/tests/test_loop_offline.cpp.o
 test_loop_offline: CMakeFiles/test_loop_offline.dir/build.make
+test_loop_offline: /usr/lib/x86_64-linux-gnu/libssl.so
+test_loop_offline: /usr/lib/x86_64-linux-gnu/libcrypto.so
 test_loop_offline: CMakeFiles/test_loop_offline.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/workspace/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable test_loop_offline"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/test_loop_offline.dir/link.txt --verbose=$(VERBOSE)

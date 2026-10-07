@@ -39,11 +39,19 @@ void start_mock(const char* port) {
       chunks << "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9000,\"completion_tokens\":5}}\n\n";
       chunks << "data: [DONE]\n\n";
     }
-    std::string body = chunks.str();
-    res.set_content_provider("text/event-stream",
-      [&body](size_t offset, httplib::DataSink& sink) {
-        return sink.write(body.data(), body.size());
-      });
+    // SSE via content provider. IMPORTANT (verified by live test): httplib's
+    // no-length provider keeps re-invoking the callback from offset 0 forever
+    // unless we signal completion — returning false on the SECOND call closes
+    // the stream cleanly after all bytes are written.
+    auto sp = std::make_shared<std::string>(chunks.str());
+    auto done = std::make_shared<bool>(false);
+    res.set_content_provider(
+        "text/event-stream",
+        [sp, done](size_t /*offset*/, httplib::DataSink& sink) {
+          if (*done) return false;   // stream complete -> server closes chunked body
+          *done = true;
+          return sink.write(sp->data(), sp->size());
+        });
   });
   svr.listen("127.0.0.1", atoi(port));
 }

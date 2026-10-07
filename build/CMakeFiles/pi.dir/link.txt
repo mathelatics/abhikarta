@@ -1,1 +1,1 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/pi.dir/src/main.cpp.o -o pi 
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/pi.dir/src/main.cpp.o -o pi  /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so 
