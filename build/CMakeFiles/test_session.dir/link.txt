@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/test_session.dir/tests/test_session.cpp.o -o test_session 

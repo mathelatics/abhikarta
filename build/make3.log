@@ -1,0 +1,41 @@
+[ 12%] Building CXX object CMakeFiles/test_tools.dir/tests/test_tools.cpp.o
+[ 25%] Building CXX object CMakeFiles/pi.dir/src/main.cpp.o
+[ 50%] Built target test_session
+[ 62%] Building CXX object CMakeFiles/test_loop_offline.dir/tests/test_loop_offline.cpp.o
+In file included from /workspace/src/core/jsonutil.hpp:6,
+                 from /workspace/src/core/tools.hpp:4,
+                 from /workspace/tests/test_tools.cpp:1:
+/workspace/vendor/json.h:62: warning: "json_weak" redefined
+   62 | #define json_weak JSON_ATTRIBUTE(weak)
+      | 
+/workspace/src/core/jsonutil.hpp:4: note: this is the location of the previous definition
+    4 | #define json_weak __attribute__((unused))  // header-only use: silence weak-symbol attr
+      | 
+In file included from /workspace/src/core/jsonutil.hpp:6,
+                 from /workspace/src/core/session.hpp:4,
+                 from /workspace/src/core/context.hpp:4,
+                 from /workspace/src/core/agent.hpp:3,
+                 from /workspace/src/main.cpp:4:
+/workspace/vendor/json.h:62: warning: "json_weak" redefined
+   62 | #define json_weak JSON_ATTRIBUTE(weak)
+      | 
+/workspace/src/core/jsonutil.hpp:4: note: this is the location of the previous definition
+    4 | #define json_weak __attribute__((unused))  // header-only use: silence weak-symbol attr
+      | 
+In file included from /workspace/src/core/jsonutil.hpp:6,
+                 from /workspace/src/core/session.hpp:4,
+                 from /workspace/src/core/context.hpp:4,
+                 from /workspace/src/core/agent.hpp:3,
+                 from /workspace/tests/test_loop_offline.cpp:4:
+/workspace/vendor/json.h:62: warning: "json_weak" redefined
+   62 | #define json_weak JSON_ATTRIBUTE(weak)
+      | 
+/workspace/src/core/jsonutil.hpp:4: note: this is the location of the previous definition
+    4 | #define json_weak __attribute__((unused))  // header-only use: silence weak-symbol attr
+      | 
+[ 75%] Linking CXX executable test_tools
+[ 75%] Built target test_tools
+[ 87%] Linking CXX executable test_loop_offline
+[ 87%] Built target test_loop_offline
+[100%] Linking CXX executable pi
+[100%] Built target pi
