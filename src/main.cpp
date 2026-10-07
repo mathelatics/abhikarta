@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
   if (o.model.empty()) {
     const char* e = getenv("PI_MODEL");
     o.model = e ? e : (o.base_url.find("nvidia") != std::string::npos
-                       ? "openai/gpt-oss-20b" : "local-model");
+                       ? "nvidia/nemotron-3.5-lightning-30b-a3b" : "local-model");
   }
 
   // ~/.pi_agent.env — user-local config/key file (chmod 600, never committed).
@@ -83,7 +83,8 @@ int main(int argc, char** argv) {
     if (o.base_url.empty() || o.base_url == "http://localhost:1234/v1") {
       if (const char* e = getenv("PI_BASE_URL")) o.base_url = e;
     }
-    if (getenv("PI_MODEL") && (o.model == "local-model" || o.model == "meta/llama-3.1-70b-instruct"))
+    if (getenv("PI_MODEL") && (o.model == "local-model" || o.model == "meta/llama-3.1-70b-instruct"
+                               || o.model == "openai/gpt-oss-20b"))
       o.model = getenv("PI_MODEL");
   }
 

@@ -69,6 +69,7 @@ public:
   // Parse one SSE "data:" payload into accumulators. Public for unit testing.
   struct Acc {
     std::string text;
+    std::string reasoning;
     std::map<int, ToolCall> tcs;
     std::map<int, std::string> tc_args;
     Usage usage;
@@ -88,6 +89,10 @@ public:
       json_value_s* dl = ju::member(e->value, "delta");
       if (!dl) dl = ju::member(e->value, "message");   // non-stream fallback
       if (!dl) continue;
+      // Nemotron / reasoning models stream chain-of-thought in reasoning_content.
+      // Capture it but do NOT treat it as the answer text.
+      std::string rc = ju::str(dl, "reasoning_content");
+      if (!rc.empty()) a.reasoning += rc;
       std::string c = ju::str(dl, "content");
       if (!c.empty()) { a.text += c; out_ << c << std::flush; }
       auto* tca = ju::arr(dl, "tool_calls");
@@ -114,10 +119,16 @@ public:
     cli.set_connection_timeout(15, 0);
     cli.set_keep_alive(true);
 
+    // Nemotron-3 reasoning models stream chain-of-thought into content unless
+    // reasoning is explicitly disabled (NIM API param: extra_body.reasoning).
+    bool nemotron = cfg_.model.find("nemotron") != std::string::npos;
     std::ostringstream body;
     body << "{\"model\":" << ju::q(cfg_.model)
          << ",\"messages\":" << messages_json(msgs)
-         << ",\"stream\":true,\"temperature\":0.2";
+         << ",\"stream\":true,\"temperature\":0.2"
+         << ",\"max_tokens\":" << (nemotron ? 8192 : 4096);
+    if (nemotron)
+      body << ",\"reasoning\":{\"exclude\":true,\"effort\":\"high\"}";
     if (!tools_json.empty() && tools_json != "[]")
       body << ",\"tools\":" << tools_json << ",\"tool_choice\":\"auto\"";
     body << "}";
@@ -149,6 +160,15 @@ public:
     if (res->status >= 400) { r.error = "HTTP " + std::to_string(res->status) + ": " + res->body; return r; }
 
     r.text = acc.text;
+    // Fallback: if the model only produced reasoning (e.g. server ignored the
+    // exclude flag), salvage a clean answer by stripping the thinking block.
+    if (r.text.empty() && !acc.reasoning.empty()) {
+      std::string& R = acc.reasoning;
+      size_t s = R.find("\n\n");            // heuristic: answer after thinking
+      if (s != std::string::npos && R.size() - s > 40) r.text = R.substr(s);
+      else r.text = R.substr(0, 2000);
+      out_ << r.text << std::flush;
+    }
     for (auto& [idx, tc] : acc.tcs) {
       if (tc.name.empty()) continue;
       if (tc.id.empty()) tc.id = "call_" + std::to_string(idx);

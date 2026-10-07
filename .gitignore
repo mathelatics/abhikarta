@@ -1,11 +1,2 @@
-# Build directories
+# Build artifacts
 build/
-
-# Compiled object files
-*.o
-*.obj
-
-# CMake specific artifacts
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
