@@ -30,7 +30,7 @@ void start_mock(const char* port) {
       // round 1: text delta + tool_call deltas split across SSE chunks.
       // args arrive in two fragments: {"path":"/tmp/pi_e2e.txt"  then  , "content":"created by pi"}
       chunks << "data: {\"choices\":[{\"delta\":{\"content\":\"Sure. \",\"role\":\"assistant\"}}]}\n\n";
-      chunks << "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/pi_e2e.txt\\\"}\"}}]}}]}\n\n";
+      chunks << "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/pi_e2e.txt\\\"}}]}}]}\n\n";
       chunks << "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\", \\\"content\\\":\\\"created by pi\\\"}\"}}]}}]}\n\n";
       chunks << "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":30}}\n\n";
       chunks << "data: [DONE]\n\n";

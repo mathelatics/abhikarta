@@ -1,1 +1,1 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/test_loop_offline.dir/tests/test_loop_offline.cpp.o -o test_loop_offline  /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so 
+/usr/bin/c++ CMakeFiles/test_loop_offline.dir/tests/test_loop_offline.cpp.o -o test_loop_offline 

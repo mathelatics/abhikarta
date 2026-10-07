@@ -47,11 +47,11 @@ int main(int argc, char** argv) {
     std::cerr << "pi: " << e.what() << "\n"; return 2;
   }
 
-  // resolve configuration
+// resolve configuration
   if (o.base_url.empty()) {
     const char* e = getenv("PI_BASE_URL");
     o.base_url = e ? e : (getenv("NVIDIA_API_KEY") ? "https://integrate.api.nvidia.com/v1"
-                                                   : "http://localhost:1234/v1");
+                                                    : "http://localhost:1234/v1");
   }
   if (o.api_key.empty()) {
     if (const char* e = getenv("PI_API_KEY")) o.api_key = e;
@@ -63,6 +63,13 @@ int main(int argc, char** argv) {
     o.model = e ? e : (o.base_url.find("nvidia") != std::string::npos
                        ? "nvidia/nemotron-3.5-lightning-30b-a3b" : "local-model");
   }
+
+  // Log startup config
+  std::cerr << "pi: starting agent config\n"
+            << "  base_url=" << o.base_url << "\n"
+            << "  model=" << o.model << "\n"
+            << "  tools=" << o.tools_csv << "\n"
+            << "  window=" << o.window << "\n";
 
   // ~/.pi_agent.env — user-local config/key file (chmod 600, never committed).
   // Loaded last so flags still win; env vars already set take precedence.
@@ -94,6 +101,9 @@ int main(int argc, char** argv) {
 
   EventBus bus;
   bus.on("tool_call", [](const std::string& p){ std::cerr << "\x1b[33m⚙ " << p << "\x1b[0m\n"; });
+  bus.on("agent_end", [](const std::string& p){ std::cerr << "pi: agent finished: " << p << "\n"; });
+  bus.on("compaction", [](const std::string& p){ std::cerr << "pi: compaction: " << p << "\n"; });
+  bus.on("goal_achieved", [](const std::string& p){ std::cerr << "pi: goal achieved: " << p << "\n"; });
   Agent agent(cfg, bus);
   if (!o.tools_csv.empty()) {
     std::vector<std::string> names; std::stringstream ss(o.tools_csv); std::string t;

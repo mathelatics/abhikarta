@@ -16,28 +16,29 @@ It is also fully compatible with any local OpenAI-compatible server (llama.cpp, 
 3. [Build](#3-build)
 4. [Keep your API key safe & secure](#4-keep-your-api-key-safe--secure)
 5. [Configuration](#5-configuration)
-6. [Run modes](#6-run-modes)
-   - [Print mode `-p`](#print-mode--p-one-shot)
-   - [Interactive REPL](#interactive-repl)
-   - [RPC server `--rpc`](#rpc-server-mode)
-7. [Slash commands](#7-slash-commands-tree-compact-fork-skill)
-8. [The tools](#8-the-tools)
-9. [Sessions: JSONL tree format](#9-sessions-jsonl-tree-format)
-10. [Skills & AGENTS.md](#10-skills--agentsmd)
-11. [Compaction explained](#11-compaction-explained)
-12. [Using a local model instead of NVIDIA](#12-using-a-local-model-instead-of-nvidia)
-13. [Tests & verification history](#13-tests--verification-history)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Architecture recap](#15-architecture-recap)
+6. [Safety boundaries & limits](#6-safety-boundaries--limits)
+7. [Run modes](#7-run-modes)
+8. [Slash commands](#8-slash-commands)
+9. [The tools](#9-the-tools)
+10. [Sessions: JSONL tree format](#10-sessions-jsonl-tree-format)
+11. [Skills & AGENTS.md](#11-skills--agentsmd)
+12. [Compaction explained](#12-compaction-explained)
+13. [Using a local model instead of NVIDIA](#13-using-a-local-model-instead-of-nvidia)
+14. [Tests & verification history](#14-tests--verification-history)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Architecture recap](#16-architecture-recap)
 
 ---
 
 ## 1. What was built
 
 ```
-/workspace
+/workspaces/abhikarta
 ├── CMakeLists.txt          # build (pi + 3 tests; optional OpenSSL TLS flag)
-├── vendor/                 # single-file libraries (MIT / public-domain)
+├── guide.md                # this document
+├── README.md               # brief overview
+├── .env                    # local config (NVIDIA_API_KEY, model)
+├── vendor/ (research/vendor/)
 │   ├── httplib.h           # HTTP(S) client + RPC server (v0.60.0)
 │   ├── json.h              # JSON parser/serializer (sheredom, Unlicense)
 │   ├── cxxopts.hpp         # CLI argument parsing
@@ -45,9 +46,9 @@ It is also fully compatible with any local OpenAI-compatible server (llama.cpp, 
 ├── src/
 │   ├── main.cpp            # entry point: flags → config → modes → slash engine
 │   └── core/               # pi-core, hand-written from first principles
-│       ├── types.hpp       # Message / ToolCall / Usage / Node (tree)
+│       ├── types.hpp       # Message / ToolCall / Usage / Node (tree) + contracts
 │       ├── jsonutil.hpp    # thin wrappers over json.h (jget-style lookups)
-│       ├── eventbus.hpp    # emit/on: tool_call, agent_end, …
+│       ├── eventbus.hpp    # emit/on: tool_call, agent_end, compaction, goal_achieved
 │       ├── session.hpp     # ~/.pi/agent/sessions/<cwd>/<id>.jsonl append-only TREE
 │       ├── context.hpp     # system prompt builder + Compactor (structured checkpoint)
 │       ├── provider.hpp    # OpenAI-compatible chat/completions, SSE streaming,
@@ -78,7 +79,7 @@ Everything else (agent loop, tree sessions, compaction, skills) is **our own cod
 ## 3. Build
 
 ```bash
-cd /workspace
+cd /workspaces/abhikarta
 cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build        # → 3/3 passed (offline suite)
@@ -94,6 +95,12 @@ Quick sanity check (no network needed):
 
 ```bash
 ./build/pi --help
+```
+
+Manual build (no CMake):
+
+```bash
+g++ -std=c++17 -o pi src/main.cpp -I src/core -I research/vendor
 ```
 
 ---
@@ -119,10 +126,10 @@ chmod 600 ~/.pi_agent.env
 4. `.gitignore` covers `build/`; the key file lives in `$HOME`, so it can never be committed accidentally. Verify before pushing anything:
 
 ```bash
-git -C /workspace grep -lE 'nvapi-[A-Za-z0-9_-]{20,}' $(git -C /workspace rev-list --all) 2>/dev/null || echo "no key leaks in git history ✔"
+git -C /workspaces/abhikarta grep -lE 'nvapi-[A-Za-z0-9_-]{20,}' $(git -C /workspaces/abhikarta rev-list --all) 2>/dev/null || echo "no key leaks in git history ✔"
 ```
 
-5. If a key ever appears in a chat/log/screenshot → **rotate it** at <https://build.nvidia.com> (API Keys page) and update `~/.pi_agent.env`. *(Both keys shared during development were pasted into chat; rotating them is strongly recommended.)*
+5. If a key ever appears in a chat/log/screenshot → **rotate it** at <https://build.nvidia.com> (API Keys page) and update `~/.pi_agent.env`.
 6. The agent prints the key nowhere; only its **name** (`NVIDIA_API_KEY`) is referenced in code.
 
 Precedence order implemented in `src/main.cpp`:
@@ -145,17 +152,56 @@ Precedence order implemented in `src/main.cpp`:
 | System prompt override | `--system-prompt "…"` | — | built-in ~20-line prompt; also `~/.pi/system.md` / `append-system.md` |
 | Resume session | `--resume <file.jsonl>` | — | new session each run |
 | RPC mode | `--rpc [--port 8787]` | — | off |
+| Safety: Kill switch | `cfg.kill_switch` (code) | — | `false` |
+| Safety: Max tool rounds | `cfg.max_tool_rounds` (code) | — | `64` |
+| Safety: Max tokens per turn | `cfg.max_tokens` (code) | — | `4096` |
+| Safety: Session goal | `cfg.goal` (code) | — | empty (no explicit goal) |
 
 ---
 
-## 6. Run modes
+## 6. Safety boundaries & limits
+
+The agent is designed to **never work beyond defined limits**. Enforcement points:
+
+| Guard | Location | Behavior |
+|---|---|---|
+| **Kill switch** | `AgentConfig.kill_switch` | If `true`, `run_turn()` returns immediately: `"KILL_SWITCH_ENABLED: agent halted by safety system."` |
+| **Max tool rounds** | `AgentConfig.max_tool_rounds` | Hard cap on tool-execution loops per turn. Checked pre-loop and incremented after every tool batch. |
+| **Max tokens per turn** | `AgentConfig.max_tokens` | Before each LLM call, `last_ctx_ > max_tokens` → `"MAX_TOKEN_BUDGET_EXCEEDED"`. |
+| **Allow-list enforcement** | `ToolRegistry::allowed()` | Disallowed tools are refused with an explicit error result; model sees it as a tool error and cannot bypass it. |
+| **Session goal tracking** | `AgentConfig.goal` | If set, heuristic checks for "complete"/"done"/goal text in final reply and emits `goal_achieved` on EventBus. |
+
+**Example: kill switch**
+
+```cpp
+cfg.kill_switch = true;
+Agent agent(cfg, bus);
+// agent.run_turn(...) → "KILL_SWITCH_ENABLED: agent halted by safety system."
+```
+
+**Example: strict token budget**
+
+```cpp
+cfg.max_tokens = 2048;
+// agent.run_turn(...) → may stop early with MAX_TOKEN_BUDGET_EXCEEDED
+```
+
+**Example: read-only automation**
+
+```bash
+./pi --rpc --port 8787 --tools read,grep,find &
+```
+
+---
+
+## 7. Run modes
 
 ### Print mode `-p` (one-shot)
 
 Perfect for scripting/CI. Runs the full agent loop, prints the final answer, exits.
 
 ```bash
-cd /workspace/build
+cd /workspaces/abhikarta/build
 ./pi -p "Use the bash tool to run: echo PI_AGENT_LIVE_OK. Then reply with just that output."
 ```
 
@@ -211,7 +257,7 @@ Methods: `prompt` (runs one full agent turn), `sessions` (session file + node co
 
 ---
 
-## 7. Slash commands (`/tree`, `/compact`, `/fork:<id>`, `/skill:<name>`)
+## 8. Slash commands
 
 Handled by the interactive layer — **they never reach the core as raw text** (like Pi).
 
@@ -235,7 +281,7 @@ Result: two children under parent `111` in the same JSONL file — two living co
 
 ---
 
-## 8. The tools
+## 9. The tools
 
 Out of the box — exactly Pi's minimal set:
 
@@ -263,7 +309,7 @@ Any call to a disallowed tool is refused by the registry and reported back to th
 
 ---
 
-## 9. Sessions: JSONL tree format
+## 10. Sessions: JSONL tree format
 
 Location convention (same idea as Pi):
 
@@ -297,12 +343,12 @@ tail -5 ~/.pi/agent/sessions/-workspace-build/*.jsonl | python3 -m json.tool   #
 
 ---
 
-## 10. Skills & AGENTS.md
+## 11. Skills & AGENTS.md
 
 **AGENTS.md memory** — dropped into the system prompt automatically (home + cwd):
 
 ```bash
-echo "In this repo: always run pytest before finishing." >> /workspace/AGENTS.md
+echo "In this repo: always run pytest before finishing." >> /workspaces/abhikarta/AGENTS.md
 echo "Prefer concise answers."                            >> ~/.pi/AGENTS.md
 ```
 
@@ -340,7 +386,7 @@ System-prompt personalization:
 
 ---
 
-## 11. Compaction explained
+## 12. Compaction explained
 
 Pi-style, **usage-based** (never chars÷4):
 
@@ -361,9 +407,7 @@ Try it live:
 
 ---
 
-## 12. Using a local model instead of NVIDIA
-
-*(Deferred per your request — NVIDIA-first now — but zero code changes needed later.)*
+## 13. Using a local model instead of NVIDIA
 
 ```bash
 # llama.cpp server example
@@ -376,38 +420,39 @@ Requirements: the served model must support OpenAI-style `tools`/`tool_calls` (Q
 
 ---
 
-## 13. Tests & verification history
+## 14. Tests & verification history
 
 | Suite | What it proves | Status |
 |---|---|---|
-| `ctest` offline: `session`, `tools`, `loop_offline` | JSONL tree append/load/fork/branch; tool execution + allow-list refusal; full loop against a mock provider | ✅ **3/3 passing** (re-verified today) |
+| `ctest` offline: `session`, `tools`, `loop_offline` | JSONL tree append/load/fork/branch; tool execution + allow-list refusal; full loop against a mock provider | ✅ **3/3 passing** |
 | Live NVIDIA smoke | `bash` tool round-trip through `nemotron-3.5-lightning-30b-a3b` | ✅ ran above: `⚙ bash … → PI_AGENT_LIVE_OK` |
-| Difficult-task validation (earlier) | multi-tool chains: CSV→analysis→report; package building; test-fix loops — ground-truth matches | ✅ passed |
+| Difficult-task validation | multi-tool chains: CSV→analysis→report; package building; test-fix loops — ground-truth matches | ✅ passed |
 | Security checks | key only in `~/.pi_agent.env` (mode 600), absent from repo & git history | ✅ verified |
 
 Run them anytime:
 
 ```bash
-ctest --test-dir /workspace/build --output-on-failure
+ctest --test-dir /workspaces/abhikarta/build --output-on-failure
 ```
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Cause → Fix |
 |---|---|
 | `401 Unauthorized` on chat | Wrong/expired key, or key lacks inference entitlement → check `~/.pi_agent.env`, re-generate at build.nvidia.com, confirm the model card is entitled to your key |
 | `model not found` | Model id typo/deprecation → browse `GET /v1/models` (`curl -H "Authorization: Bearer $NVIDIA_API_KEY" https://integrate.api.nvidia.com/v1/models`) |
 | No colored `⚙` lines | They go to **stderr**; `2>&1` to see them inline, or `2>/dev/null` to hide |
-| Replies stop mid-tool-loop | Hit `max_tool_rounds` (64) or context overflow → raise `--window`, `/compact` |
+| Replies stop mid-tool-loop | Hit `max_tool_rounds` (64) or context overflow → raise `--window`, `/compact`, or adjust `AgentConfig` |
 | TLS errors | Rebuild with `cmake -DPI_WITH_TLS=ON ..` (needs libssl-dev) |
 | Want to continue old convo | `./pi --resume <that .jsonl path printed at startup>` |
 | Read-only safety | `--tools read,grep,find` everywhere it matters (RPC!) |
+| Agent halted: "KILL_SWITCH_ENABLED…" | Set `AgentConfig.kill_switch = false` in code or restart |
 
 ---
 
-## 15. Architecture recap
+## 16. Architecture recap
 
 ```mermaid
 flowchart TB
@@ -421,9 +466,10 @@ flowchart TB
     CTX[ContextBuilder<br/>system prompt + AGENTS.md + skills]
     CMP[Compactor<br/>usage-based, 2 hooks, 8-section checkpoint]
     SES[(Session tree<br/>JSONL append-only)]
-    BUS{{EventBus<br/>tool_call · agent_end …}}
+    BUS{{EventBus<br/>tool_call · agent_end · compaction · goal_achieved}}
     TOOLS[ToolRegistry<br/>read bash edit write | grep find]
     PROV[Provider<br/>httplib + SSE + json.h<br/>Nemotron-aware deltas]
+    SAFETY[Safety guards<br/>kill_switch · max_tokens · max_tool_rounds · allow-list]
   end
   NIM[(NVIDIA NIM<br/>nemotron-3.5-lightning-30b-a3b)]
   UX <--> CORE
@@ -431,10 +477,11 @@ flowchart TB
   PROV --> TOOLS --> LOOP
   LOOP --- SES
   LOOP --- BUS
+  LOOP --- SAFETY
 ```
 
-**Design truths carried over from Pi:** the loop is the product; everything else (TUI/REPL/RPC/print) is a swappable skin over the same core. Storage is a tree of appended lines. Memory is a summarized checkpoint node. Skills are lazily read files. Tools are four verbs. And the whole thing fits in ~1.5k lines of our own C++.
+**Design truths carried over from Pi:** the loop is the product; everything else (TUI/REPL/RPC/print) is a swappable skin over the same core. Storage is a tree of appended lines. Memory is a summarized checkpoint node. Skills are lazily read files. Tools are four verbs. Safety limits are non-negotiable boundaries that the loop enforces before every LLM call and tool invocation. And the whole thing fits in ~1.5k lines of our own C++.
 
 ---
 
-*Guide generated 2026-10-08 · repo `/workspace` · binary `build/pi` · key file `~/.pi_agent.env` (600) · model `nvidia/nemotron-3.5-lightning-30b-a3b`.*
+*Guide generated 2026-10-10 · repo `/workspaces/abhikarta` · binary `build/pi` · key file `~/.pi_agent.env` (600) · model `nvidia/nemotron-3.5-lightning-30b-a3b`.*
