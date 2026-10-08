@@ -25,7 +25,7 @@ __pycache__/
 .venv/
 venv/
 
-# --- agent / session exports (local, regenerate anytime) ---
+# ---  session exports (local, regenerate anytime) ---
 
 session-*.md
 *.session.jsonl

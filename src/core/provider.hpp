@@ -3,6 +3,7 @@
 #pragma once
 #include "types.hpp"
 #include "jsonutil.hpp"
+#include "console.hpp"
 #include <httplib.h>
 #include <sstream>
 #include <iostream>
@@ -98,10 +99,10 @@ public:
       std::string rc = ju::str(dl, "reasoning_content");
       if (!rc.empty()) {
         a.reasoning += rc;
-        std::cerr << "\x1b[2m" << rc << "\x1b[0m" << std::flush;
+        Console::ref().thinking(rc);
       }
       std::string c = ju::str(dl, "content");
-      if (!c.empty()) { a.text += c; out_ << c << std::flush; }
+      if (!c.empty()) { a.text += c; Console::ref().content(out_, c); }
       auto* tca = ju::arr(dl, "tool_calls");
       for (auto* te = tca ? tca->start : nullptr; te; te = te->next) {
         int idx = (int)ju::num(te->value, "index", 0);
@@ -158,20 +159,22 @@ public:
         const char spin[] = "-\\|/";
         int i = 0;
         while (!stop.load()) {
-          std::cerr << "\x1b[2mThinking " << spin[i++ % 4] << "\x1b[0m\r" << std::flush;
+          Console::ref().live("\x1b[2mThinking " + std::string(1, spin[i++ % 4]) + "\x1b[0m");
           std::this_thread::sleep_for(std::chrono::milliseconds(120));
         }
-        std::cerr << "               \r" << std::flush;
       }) {}
       ~Spinner() {
         stop.store(true);
+        Console::ref().release();
         if (th.joinable()) th.join();
       }
       void arrived() { stop.store(true); }
     } spinner;
+    Console::ref().reset_request();
 
     int attempts = 0;
     bool success = false;
+    bool aborted = false;
     Acc acc;
     for (attempts = 0; attempts < 2 && !success; ++attempts) {
       acc = Acc{};
@@ -179,6 +182,7 @@ public:
       auto res = cli.Post((prefix + "/chat/completions").c_str(), h,
                           body.str(), "application/json",
                           [&](const char* data, size_t len) -> bool {
+        if (cancel_ && cancel_->load()) { aborted = true; return false; }
         line_buf.append(data, len);
         size_t nl;
         while ((nl = line_buf.find('\n')) != std::string::npos) {
@@ -195,6 +199,7 @@ public:
       });
 
       if (!res) {
+        if (aborted) { r.error = "aborted by user"; return r; }
         if (attempts + 1 < 2) continue;   // transient network; retry once
         r.error = "HTTP request failed: " + httplib::to_string(res.error());
         return r;                          // Spinner dtor joins safely
@@ -208,6 +213,7 @@ public:
       success = true;
     }
 
+    if (aborted) { r.error = "aborted by user"; return r; }
     spinner.arrived();
 
     r.text = acc.text;
@@ -219,7 +225,7 @@ public:
       size_t s = R.find("\n\n");            // heuristic: answer after thinking
       if (s != std::string::npos && R.size() - s > 40) r.text = R.substr(s);
       else r.text = R.substr(0, 2000);
-      out_ << r.text << std::flush;
+      Console::ref().content(out_, r.text);
     }
     for (auto& [idx, tc] : acc.tcs) {
       if (tc.name.empty()) continue;
@@ -235,10 +241,54 @@ public:
 
   const ProviderConfig& cfg() const { return cfg_; }
   void set_model(const std::string& m) { cfg_.model = m; }
+  void set_base_url(const std::string& u) { cfg_.base_url = u; }
+  void set_api_key(const std::string& k) { cfg_.api_key = k; }
+  // Optional abort flag (agent's /abort): checked on every SSE chunk, the
+  // content receiver then returns false and httplib cancels the request.
+  void set_cancel(std::atomic<bool>* p) { cancel_ = p; }
+
+  // ---- model catalog: GET {base_url}/models (OpenAI-compatible, one path
+  // covers openai / nvidia / huggingface router / ollama / lmstudio / llama.cpp)
+  static std::vector<std::string> parse_models(const std::string& body) {
+    std::vector<std::string> out;
+    ju::Doc d; if (!d.parse(body)) return out;
+    auto* data = ju::member(d.root, "data");
+    if (data && data->type == json_type_array) {
+      for (auto* e = json_value_as_array(data)->start; e; e = e->next) {
+        std::string id = ju::str(e->value, "id");
+        if (!id.empty()) out.push_back(id);
+      }
+    }
+    return out;
+  }
+
+  static bool list_models(const std::string& base_url, const std::string& api_key,
+                          std::vector<std::string>& out, std::string& err) {
+    out.clear(); err.clear();
+    std::string host, prefix; split_base(base_url, host, prefix);
+    httplib::Client cli(host);
+    cli.set_connection_timeout(8, 0);
+    cli.set_read_timeout(20, 0);
+    httplib::Headers h;
+    if (!api_key.empty()) h.emplace("Authorization", "Bearer " + api_key);
+    auto res = cli.Get((prefix + "/models").c_str(), h);
+    if (!res) { err = "connection failed: " + httplib::to_string(res.error()); return false; }
+    if (res->status >= 400) {
+      err = "HTTP " + std::to_string(res->status);
+      if (res->body.size() > 200) res->body.resize(200);
+      err += ": " + res->body;
+      return false;
+    }
+    out = parse_models(res->body);
+    if (out.empty()) { err = "endpoint returned no models"; return false; }
+    return true;
+  }
+
 
 private:
   ProviderConfig cfg_;
   std::ostream& out_;
+  std::atomic<bool>* cancel_ = nullptr;
 };
 
 } // namespace pi

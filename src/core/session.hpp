@@ -152,7 +152,10 @@ public:
       << ",\"parentId\":" << (n.parent_id.empty() ? "null" : ju::q(n.parent_id))
       << ",\"timestamp\":" << n.timestamp
       << ",\"type\":" << ju::q(n.type);
-    if (n.type == "message") o << ",\"message\":" << msg_to_json(n.msg);
+    if (n.type == "message") {
+      o << ",\"message\":" << msg_to_json(n.msg);
+      if (!n.summary_json.empty()) o << ",\"summary\":" << n.summary_json;  // e.g. interjection marker
+    }
     else if (!n.summary_json.empty()) o << ",\"summary\":" << n.summary_json;
     o << ",\"usage\":{\"input\":" << n.usage.input
       << ",\"output\":" << n.usage.output

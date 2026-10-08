@@ -37,6 +37,10 @@
 #pragma once
 #include "context.hpp"
 #include "eventbus.hpp"
+#include "console.hpp"
+#include <mutex>
+#include <deque>
+#include <atomic>
 
 namespace pi {
 
@@ -57,7 +61,9 @@ public:
   Agent(AgentConfig cfg, EventBus& bus)
     : cfg_(std::move(cfg)), bus_(bus),
       prov_(cfg_.provider), ctx_(), compactor_(),
-      tool_rounds_(0) {}
+      tool_rounds_(0) {
+    prov_.set_cancel(&stop_requested_);   // mid-stream /abort
+  }
 
   int tool_rounds_used() const { return tool_rounds_; }
   const ProviderConfig& provider_cfg() const { return cfg_.provider; }
@@ -71,6 +77,46 @@ public:
   void ensure_tools_registered() {
     if (tools_.tools.empty()) ToolRegistry::register_all(tools_, cfg_.cwd);
   }
+
+  // ---- mid-run steering: user interjections + abort ------------------------
+  // Queued from the REPL thread while a turn is running on the worker thread.
+  // Drained at the top of each LLM round (never mid tool-call pair), so the
+  // injection lands in the very next prompt.
+  void queue_interjection(const std::string& text) {
+    std::lock_guard<std::mutex> lk(inj_mtx_);
+    injections_.push_back(text);
+  }
+  void request_stop() { stop_requested_.store(true); }
+  void clear_stop() { stop_requested_.store(false); }
+  bool stop_requested() const { return stop_requested_.load(); }
+
+  // Accessors so the session layer can continue a turn with interjections that
+  // arrived too late to drain (assistant already produced the final reply).
+  bool has_interjections() const {
+    std::lock_guard<std::mutex> lk(inj_mtx_);
+    return !injections_.empty();
+  }
+  std::string take_interjection() {
+    std::lock_guard<std::mutex> lk(inj_mtx_);
+    std::string t;
+    if (!injections_.empty()) { t = std::move(injections_.front()); injections_.pop_front(); }
+    return t;
+  }
+  // True when run_turn ended early via a safety guard or user /abort
+  // (as opposed to a normal final reply).
+  bool stopped() const { return !last_stop_.empty(); }
+
+  // Switch endpoint (provider base_url + key + model) at any point in time.
+  void set_endpoint(const std::string& base_url, const std::string& api_key,
+                    const std::string& model) {
+    cfg_.provider.base_url = base_url;
+    cfg_.provider.api_key = api_key;
+    cfg_.provider.model = model;
+    prov_.set_base_url(base_url);
+    prov_.set_api_key(api_key);
+    prov_.set_model(model);
+  }
+
 
   // Called when a fresh session starts: forget cumulative safety state so a
   // finished/expired session cannot poison the next one (last_ctx_ was kept
@@ -88,6 +134,9 @@ public:
 
     // Reset cumulative per-turn tool counter
     tool_rounds_ = 0;
+    // Drop stale aborts (e.g. /abort that raced with the previous turn's end)
+    stop_requested_.store(false);
+    last_stop_.clear();   // fresh turn: not stopped until a guard fires
 
     // Safety: check kill switch
     if (cfg_.kill_switch) return guard_stop("KILL_SWITCH_ENABLED: agent halted by safety system.");
@@ -115,6 +164,16 @@ public:
     std::string final_text;
     Usage u;
     for (int round = 0; round < cfg_.max_tool_rounds; ++round) {
+      // Abort wins: /abort was requested -> stop at this step boundary.
+      if (stop_requested_.exchange(false))
+        return guard_stop("ABORTED: turn stopped by user (/abort).");
+
+      // Inject any user interjections queued while the turn was running.
+      // Loop-top placement = after tool results, before the next LLM call,
+      // so tool-call/result pairing stays valid and the model sees the
+      // interjection at the very next prompt.
+      drain_injections(sess, leaf_id, msgs);
+
       // Safety: check kill switch and token budgets before each LLM call
       if (cfg_.kill_switch) return guard_stop("KILL_SWITCH_ENABLED: agent halted by safety system.");
       if (cfg_.max_tokens > 0 && session_tokens_ > cfg_.max_tokens)
@@ -127,11 +186,13 @@ public:
 
       auto r = prov_.chat(msgs, tools_.schemas_json());
       if (!r.ok) {
+        if (r.error == "aborted by user")
+          return guard_stop("ABORTED: turn stopped by user (/abort).");
         final_text = "[provider error] " + r.error;
         Node an; an.id = now_id(); an.parent_id = leaf_id; an.timestamp = epoch();
         an.type = "message"; an.msg.role = "assistant"; an.msg.text = final_text;
         sess.append(an); leaf_id = an.id;
-        out_stream() << final_text << "\n";
+        Console::ref().message(final_text);
         bus_.emit("agent_response", final_text);
         return final_text;
       }
@@ -216,10 +277,30 @@ public:
 private:
   std::ostream& out_stream() { return out_override_ ? *out_override_ : std::cout; }
 
+  // Move queued interjections into the live prompt: append as user nodes in
+  // the session tree (marked) and into msgs for the very next LLM call.
+  void drain_injections(Session& sess, std::string& leaf_id,
+                        std::vector<Message>& msgs) {
+    std::deque<std::string> batch;
+    {
+      std::lock_guard<std::mutex> lk(inj_mtx_);
+      batch.swap(injections_);
+    }
+    for (auto& t : batch) {
+      Node un; un.id = now_id(); un.parent_id = leaf_id; un.timestamp = epoch();
+      un.type = "message"; un.msg.role = "user"; un.msg.text = t;
+      un.summary_json = "{\"interjection\":true}";
+      sess.append(un); leaf_id = un.id;
+      msgs.push_back(un.msg);
+      bus_.emit("interjection", t);
+    }
+  }
+
   // Safety guards return early without an LLM call, so the REPL would never
-  // stream this text — print it explicitly and return it for RPC consumers.
+  // stream this text — print it via the console and return it for RPC.
   std::string guard_stop(const std::string& msg) {
-    out_stream() << msg << "\n";
+    last_stop_ = msg;
+    Console::ref().message(msg);
     return msg;
   }
 
@@ -255,6 +336,10 @@ private:
   ToolRegistry tools_;
   long last_ctx_ = 0;
   long session_tokens_ = 0;   // cumulative input+output across this session's turns
+  mutable std::mutex inj_mtx_;
+  std::deque<std::string> injections_;   // mid-run user interjections
+  std::atomic<bool> stop_requested_{false};  // /abort (checked each step + mid-stream)
+  std::string last_stop_;                   // reason when a guard stopped the turn
   std::ostream* out_override_ = nullptr;
   int tool_rounds_;
 };
@@ -305,7 +390,21 @@ public:
 
   std::string prompt(const std::string& text) {
     if (leaf_id_.empty()) return "[session error] no active session";
-    return agent_.run_turn(sess_, leaf_id_, text);
+    std::string input = text;
+    std::string last_out;
+    // Mid-run interjections typed while the assistant was answering may arrive
+    // too late to drain (final reply already produced) — keep the turn alive:
+    // run follow-up turns with each pending interjection so it is not lost.
+    for (int cont = 0; cont <= 8; ++cont) {
+      last_out = agent_.run_turn(sess_, leaf_id_, input);
+      if (agent_.stopped()) break;                              // abort / safety guard
+      if (last_out.rfind("[provider error]", 0) == 0) break;    // dead endpoint: keep queue for next session turn
+      if (cont == 8) break;
+      std::string inj = agent_.take_interjection();
+      if (inj.empty()) break;                                   // drained mid-turn already
+      input = inj;                                              // continue the turn with it
+    }
+    return last_out;
   }
 
   void new_session() {
@@ -344,6 +443,20 @@ public:
     Node mc; mc.id = now_id(); mc.parent_id = leaf_id_; mc.timestamp = epoch();
     mc.type = "model_change";
     mc.summary_json = "{\"model\":" + ju::q(m) + ",\"base_url\":" + ju::q(cfg_.provider.base_url) + "}";
+    sess_.append(mc);
+    leaf_id_ = mc.id;
+  }
+
+  // Switch provider endpoint (base_url + key + model) live. Never records the key.
+  void switch_endpoint(const std::string& base, const std::string& key,
+                       const std::string& model) {
+    agent_.set_endpoint(base, key, model);
+    cfg_.provider.base_url = base;
+    cfg_.provider.api_key = key;
+    cfg_.provider.model = model;
+    Node mc; mc.id = now_id(); mc.parent_id = leaf_id_; mc.timestamp = epoch();
+    mc.type = "model_change";
+    mc.summary_json = "{\"model\":" + ju::q(model) + ",\"base_url\":" + ju::q(base) + "}";
     sess_.append(mc);
     leaf_id_ = mc.id;
   }

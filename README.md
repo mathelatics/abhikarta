@@ -1,6 +1,7 @@
 # abhikarta
 agent for any one
-
+ 
+› Write a toy JSON parser in C++ from scratch, compile it with g++, write a small test script that checks several JSON inputs, and iterate until it compiles and passes.
 ## Long-running prompt examples
 
 1. `Create a small Django-like app skeleton for a blog, add models/views/templates, run it, create a post, then read the template files and summarize what changed.`
