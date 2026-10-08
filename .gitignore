@@ -1,5 +1,42 @@
+# --- secrets ---
 .env
+.env.*
+*.env.local
 
-build
-build_tls
+# --- build output ---
+build/
+build_*/
+cmake-build-*/
+compile_commands.json
+CMakeUserPresets.json
+
+# --- test / coverage artifacts ---
+Testing/
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.log
+
+# --- python scratch ---
 __pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- agent / session exports (local, regenerate anytime) ---
+
+session-*.md
+*.session.jsonl
+
+# --- local scratch space ---
+rough/
+
+# --- editors / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

@@ -19,7 +19,7 @@
 //
 // Safety boundaries (Security Expert):
 //   - kill_switch: immediate halt flag
-//   - max_tokens: hard token budget per turn (default 4096)
+//   - max_tokens: cumulative session token budget (default 1000000, 0 = off)
 //   - max_tool_rounds: max tool execution loops (default 64)
 //   - max_tokens (config): total token budget guard
 //   - allow-listed tools only, with allow-list enforced via ToolRegistry::allowed()
@@ -44,12 +44,12 @@ struct AgentConfig {
   ProviderConfig provider;
   std::string cwd = ".";
   int max_tool_rounds = 64;
-  int max_tokens = 4096;
-  int max_input_tokens = 4096;
-  int max_output_tokens = 4096;
+  int max_tokens = 1000000;       // cumulative session token budget (0 = unlimited)
+  int max_input_tokens = 0;       // per-request input guard (0 = derive from context_window)
+  int max_output_tokens = 0;      // per-request output guard (0 = disabled)
   bool kill_switch = false;
   std::string allowed_tools;
-  std::string goal;  // explicit goal for this session
+  std::string goal;  // explicit goal for this session (used for goal_achieved heuristic)
 };
 
 class Agent {
@@ -60,6 +60,8 @@ public:
       tool_rounds_(0) {}
 
   int tool_rounds_used() const { return tool_rounds_; }
+  const ProviderConfig& provider_cfg() const { return cfg_.provider; }
+  void set_model(const std::string& m) { cfg_.provider.model = m; prov_.set_model(m); }
   ToolRegistry& registry() { return tools_; }
   ContextBuilder& context() { return ctx_; }
   long last_context_tokens() const { return last_ctx_; }
@@ -70,20 +72,29 @@ public:
     if (tools_.tools.empty()) ToolRegistry::register_all(tools_, cfg_.cwd);
   }
 
+  // Called when a fresh session starts: forget cumulative safety state so a
+  // finished/expired session cannot poison the next one (last_ctx_ was kept
+  // across /new, which made every follow-up turn die on the budget guard).
+  void reset_context() {
+    last_ctx_ = 0;
+    session_tokens_ = 0;
+    tool_rounds_ = 0;
+  }
+
   // One full turn: user message in, tool loop until final reply.
   // leaf_id: current tree position (fork point). Returns assistant text.
   std::string run_turn(Session& sess, std::string& leaf_id, const std::string& user_text) {
     ensure_tools_registered();
 
+    // Reset cumulative per-turn tool counter
+    tool_rounds_ = 0;
+
     // Safety: check kill switch
-    if (cfg_.kill_switch) {
-      return "KILL_SWITCH_ENABLED: agent halted by safety system.";
-    }
+    if (cfg_.kill_switch) return guard_stop("KILL_SWITCH_ENABLED: agent halted by safety system.");
 
     // Enforce max tool rounds before starting
-    if (tool_rounds_used() >= cfg_.max_tool_rounds) {
-      return "MAX_TOOL_ROUNDS_REACHED: " + std::to_string(cfg_.max_tool_rounds) + " limit exceeded.";
-    }
+    if (tool_rounds_used() >= cfg_.max_tool_rounds)
+      return guard_stop("MAX_TOOL_ROUNDS_REACHED: " + std::to_string(cfg_.max_tool_rounds) + " limit exceeded.");
 
     // 1) INIT CONTEXT: append user node under current leaf
     Node un; un.id = now_id(); un.parent_id = leaf_id; un.timestamp = epoch();
@@ -105,21 +116,30 @@ public:
     Usage u;
     for (int round = 0; round < cfg_.max_tool_rounds; ++round) {
       // Safety: check kill switch and token budgets before each LLM call
-      if (cfg_.kill_switch) return "KILL_SWITCH_ENABLED: agent halted by safety system.";
-      if (last_ctx_ > cfg_.max_tokens) return "MAX_TOKEN_BUDGET_EXCEEDED: " + std::to_string(cfg_.max_tokens) + " token limit.";
-      
+      if (cfg_.kill_switch) return guard_stop("KILL_SWITCH_ENABLED: agent halted by safety system.");
+      if (cfg_.max_tokens > 0 && session_tokens_ > cfg_.max_tokens)
+        return guard_stop("MAX_TOKEN_BUDGET_EXCEEDED: " + std::to_string(cfg_.max_tokens) +
+                          " session token limit (used " + std::to_string(session_tokens_) + ").");
+      if (last_ctx_ > cfg_.provider.context_window)
+        return guard_stop("CONTEXT_WINDOW_EXCEEDED: " + std::to_string(last_ctx_) +
+                          " > " + std::to_string(cfg_.provider.context_window) +
+                          " tokens; run /compact or start with a larger --window.");
+
       auto r = prov_.chat(msgs, tools_.schemas_json());
       if (!r.ok) {
         final_text = "[provider error] " + r.error;
         Node an; an.id = now_id(); an.parent_id = leaf_id; an.timestamp = epoch();
         an.type = "message"; an.msg.role = "assistant"; an.msg.text = final_text;
         sess.append(an); leaf_id = an.id;
+        out_stream() << final_text << "\n";
         bus_.emit("agent_response", final_text);
         return final_text;
       }
       u = r.usage;
+      session_tokens_ += u.input + u.output;
       last_ctx_ = Compactor::estimate_from_usage(u);
       if (last_ctx_ == 0) last_ctx_ = Compactor::bootstrap_estimate(msgs);
+      if (!r.reasoning.empty()) bus_.emit("reasoning", r.reasoning);
 
       Node an; an.id = now_id(); an.parent_id = leaf_id; an.timestamp = epoch();
       an.type = "message"; an.usage = u;
@@ -141,7 +161,7 @@ public:
         tn.msg.tool_call_id = tc.id; tn.msg.name = tc.name;
         sess.append(tn); leaf_id = tn.id;
         msgs.push_back(tn.msg);
-        bus_.emit("tool_result", tc.name);
+        bus_.emit("tool_result", tc.name + ":\n" + res);
       }
       tool_rounds_++;  // increment after full tool execution
       // after tools, loop continues -> next LLM call
@@ -178,7 +198,10 @@ public:
     cn.type = "compaction";
     cn.summary_json = "{\"goal\":\"(manual compact)\",\"summary\":" + ju::q(summary) + "}";
     sess.append(cn); leaf_id = cn.id;
+    long prev_ctx = last_ctx_;
+    last_ctx_ = 0;
     bus_.emit("compaction", summary);
+    bus_.emit("compaction_meta", "{\"kind\":\"manual\",\"summary\":" + ju::q(summary) + ",\"prev_ctx_tokens\":" + std::to_string(prev_ctx) + "}");
     return summary;
   }
 
@@ -188,9 +211,17 @@ public:
   }
 
   void set_out(std::ostream* o) { out_override_ = o; }
+  void set_kill_switch(bool on) { cfg_.kill_switch = on; }
 
 private:
   std::ostream& out_stream() { return out_override_ ? *out_override_ : std::cout; }
+
+  // Safety guards return early without an LLM call, so the REPL would never
+  // stream this text — print it explicitly and return it for RPC consumers.
+  std::string guard_stop(const std::string& msg) {
+    out_stream() << msg << "\n";
+    return msg;
+  }
 
   void pre_prompt_compact(Session& sess, std::string& leaf_id) {
     if (last_ctx_ == 0) return;   // no authoritative number yet (Pi's assumption)
@@ -201,6 +232,7 @@ private:
   }
   void maybe_compact(Session& sess, std::string& leaf_id) {
     if (!compactor_.needs_compaction(last_ctx_, cfg_.provider.context_window)) return;
+    long prev_ctx_ = last_ctx_;
     std::vector<Message> hist;
     Message sys; sys.role = "system"; sys.text = ctx_.build_system_prompt(cfg_.cwd);
     hist.push_back(sys);
@@ -212,6 +244,7 @@ private:
     sess.append(cn); leaf_id = cn.id;
     last_ctx_ = 0; // re-estimated next call
     bus_.emit("compaction", summary);
+    bus_.emit("compaction_meta", "{\"kind\":\"auto\",\"summary\":" + ju::q(summary) + ",\"prev_ctx_tokens\":" + std::to_string(prev_ctx_) + "}");
   }
 
   AgentConfig cfg_;
@@ -221,8 +254,184 @@ private:
   Compactor compactor_;
   ToolRegistry tools_;
   long last_ctx_ = 0;
+  long session_tokens_ = 0;   // cumulative input+output across this session's turns
   std::ostream* out_override_ = nullptr;
   int tool_rounds_;
+};
+
+// AgentSession: session lifecycle façade (CLI + RPC + SDK consumers).
+class AgentSession {
+public:
+  AgentSession(AgentConfig cfg, EventBus& bus, std::string resume_path = "")
+    : agent_(cfg, bus), bus_(bus), cfg_(cfg) {
+    if (!resume_path.empty()) {
+      if (sess_.resume(resume_path)) {
+        agent_.reset_context();
+        leaf_id_ = "";
+        for (auto it = sess_.nodes.rbegin(); it != sess_.nodes.rend(); ++it) {
+          if (it->type != "diagnostic") { leaf_id_ = it->id; break; }
+        }
+        if (leaf_id_.empty() && !sess_.nodes.empty()) leaf_id_ = sess_.nodes.back().id;
+        bool same = false;
+        for (auto it = sess_.nodes.rbegin(); it != sess_.nodes.rend(); ++it) {
+          if (it->type == "model_change") {
+            same = it->summary_json.find(cfg_.provider.model) != std::string::npos;
+            break;
+          }
+        }
+        if (!same) {
+          Node mc; mc.id = now_id(); mc.parent_id = leaf_id_; mc.timestamp = epoch();
+          mc.type = "model_change";
+          mc.summary_json = "{\"model\":" + ju::q(cfg_.provider.model) + ",\"base_url\":" + ju::q(cfg_.provider.base_url) + "}";
+          sess_.append(mc);
+          leaf_id_ = mc.id;
+        }
+      } else {
+        leaf_id_ = "";
+      }
+    }
+  }
+
+  bool open_new(const std::string& cwd) {
+    sess_.open_new(cwd);
+    agent_.reset_context();   // fresh session must not inherit last_ctx_/budget
+    Node mc; mc.id = now_id(); mc.parent_id = sess_.nodes.back().id; mc.timestamp = epoch();
+    mc.type = "model_change";
+    mc.summary_json = "{\"model\":" + ju::q(cfg_.provider.model) + ",\"base_url\":" + ju::q(cfg_.provider.base_url) + "}";
+    sess_.append(mc);
+    leaf_id_ = sess_.id;
+    return true;
+  }
+
+  std::string prompt(const std::string& text) {
+    if (leaf_id_.empty()) return "[session error] no active session";
+    return agent_.run_turn(sess_, leaf_id_, text);
+  }
+
+  void new_session() {
+    open_new(cfg_.cwd);
+  }
+
+  std::string resume_session(const std::string& path) {
+    sess_ = Session{};
+    agent_.reset_context();
+    if (!sess_.resume(path)) return "";
+    leaf_id_ = "";
+    for (auto it = sess_.nodes.rbegin(); it != sess_.nodes.rend(); ++it) {
+      if (it->type != "diagnostic") { leaf_id_ = it->id; break; }
+    }
+    if (leaf_id_.empty() && !sess_.nodes.empty()) leaf_id_ = sess_.nodes.back().id;
+    bool same = false;
+    for (auto it = sess_.nodes.rbegin(); it != sess_.nodes.rend(); ++it) {
+      if (it->type == "model_change") {
+        same = it->summary_json.find(cfg_.provider.model) != std::string::npos;
+        break;
+      }
+    }
+    if (!same) {
+      Node mc; mc.id = now_id(); mc.parent_id = leaf_id_; mc.timestamp = epoch();
+      mc.type = "model_change";
+      mc.summary_json = "{\"model\":" + ju::q(cfg_.provider.model) + ",\"base_url\":" + ju::q(cfg_.provider.base_url) + "}";
+      sess_.append(mc);
+      leaf_id_ = mc.id;
+    }
+    return sess_.file;
+  }
+
+  void set_model(const std::string& m) {
+    cfg_.provider.model = m;
+    agent_.set_model(m);
+    Node mc; mc.id = now_id(); mc.parent_id = leaf_id_; mc.timestamp = epoch();
+    mc.type = "model_change";
+    mc.summary_json = "{\"model\":" + ju::q(m) + ",\"base_url\":" + ju::q(cfg_.provider.base_url) + "}";
+    sess_.append(mc);
+    leaf_id_ = mc.id;
+  }
+
+  void set_name(const std::string& n) { name_ = n; Node nm; nm.id = now_id(); nm.parent_id = leaf_id_; nm.timestamp = epoch(); nm.type = "label"; nm.summary_json = "{\"name\":" + ju::q(n) + "}"; sess_.append(nm); leaf_id_ = nm.id; }
+  const std::string& name() const { return name_; }
+
+  std::string session_info() const {
+    std::ostringstream out;
+    out << "id=" << sess_.id << "\n"
+        << "file=" << sess_.file << "\n"
+        << "model=" << cfg_.provider.model << "\n"
+        << "base_url=" << cfg_.provider.base_url << "\n"
+        << "cwd=" << cfg_.cwd << "\n"
+        << "nodes=" << sess_.nodes.size() << "\n"
+        << "leaf=" << leaf_id_ << "\n";
+    if (!name_.empty()) out << "name=" << name_ << "\n";
+    return out.str();
+  }
+
+  std::string last_assistant_text() const {
+    for (auto it = sess_.nodes.rbegin(); it != sess_.nodes.rend(); ++it) {
+      if (it->type == "message" && it->msg.role == "assistant" && !it->msg.text.empty())
+        return it->msg.text;
+    }
+    return "";
+  }
+
+  std::string last_usage_text() const {
+    for (auto it = sess_.nodes.rbegin(); it != sess_.nodes.rend(); ++it) {
+      if (it->type == "message" && it->msg.role == "assistant") {
+        return "input=" + std::to_string(it->usage.input) +
+               " output=" + std::to_string(it->usage.output) +
+               " cache_read=" + std::to_string(it->usage.cache_read) +
+               " cache_write=" + std::to_string(it->usage.cache_write);
+      }
+    }
+    return "no usage recorded";
+  }
+
+  bool export_to(const std::string& path) const {
+    std::ifstream in(sess_.file, std::ios::binary);
+    std::ofstream out(path, std::ios::binary);
+    if (!in || !out) return false;
+    out << in.rdbuf();
+    return true;
+  }
+
+  std::string compact() { return agent_.force_compact(sess_, leaf_id_); }
+  void fork(const std::string& node_id) {
+    if (sess_.find(node_id)) leaf_id_ = node_id;
+  }
+
+  std::string session_file() const { return sess_.file; }
+  std::string session_id() const { return sess_.id; }
+  const Session& session() const { return sess_; }
+  Session& session() { return sess_; }
+  Agent& agent() { return agent_; }
+  const std::string& active_leaf() const { return leaf_id_; }
+
+  void set_out(std::ostream* o) { agent_.set_out(o); }
+  void set_kill_switch(bool on) { agent_.set_kill_switch(on); }
+
+  // Slash-command surface used by main.cpp
+  std::string tree_dump() const {
+    auto chain = sess_.branch(leaf_id_);
+    std::ostringstream out;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+      if ((*it)->type == "diagnostic") continue;   // hide diagnostics in default tree
+      size_t depth = chain.size() - (it - chain.rbegin()) - 1;
+      out << std::string(depth * 2, ' ') << "* [" << (*it)->type << "] " << (*it)->id;
+      if ((*it)->type == "message") {
+        std::string t = (*it)->msg.text;
+        if (t.size() > 60) t = t.substr(0, 60) + "…";
+        out << "  " << (*it)->msg.role << ": " << t;
+      }
+      out << "\n";
+    }
+    return out.str();
+  }
+
+private:
+  Agent agent_;
+  Session sess_;
+  EventBus& bus_;
+  std::string leaf_id_;
+  AgentConfig cfg_;
+  std::string name_;
 };
 
 } // namespace pi

@@ -61,6 +61,10 @@ public:
     Node hdr; hdr.id = id; hdr.parent_id = ""; hdr.timestamp = epoch();
     hdr.type = "session";
     append(hdr);
+    Node diag; diag.id = now_id(); diag.parent_id = id; diag.timestamp = epoch();
+    diag.type = "diagnostic";
+    diag.summary_json = "{\"event\":\"session_start\",\"cwd\":" + ju::q(cwd) + "}";
+    append(diag);
   }
   bool resume(const std::string& path) {
     file = path;
@@ -68,7 +72,12 @@ public:
     std::string stem = path.substr(pos + 1);
     auto dot = stem.find(".jsonl");
     id = stem.substr(0, dot);
-    return load();
+    if (!load()) return false;
+    Node diag; diag.id = now_id(); diag.parent_id = nodes.empty() ? "" : nodes.back().id;
+    diag.timestamp = epoch(); diag.type = "diagnostic";
+    diag.summary_json = "{\"event\":\"session_resume\",\"path\":" + ju::q(path) + "}";
+    append(diag);
+    return true;
   }
 
   void append(const Node& n) {

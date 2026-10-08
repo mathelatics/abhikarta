@@ -5,7 +5,7 @@
 #include <cstdio>
 using namespace pi;
 int main() {
-  ToolRegistry r; ToolRegistry::register_all(r, ".");
+  ToolRegistry r; ToolRegistry::register_all(r, "/tmp");
   auto w = r.invoke("write", "{\"path\":\"/tmp/pi_tool_t.txt\",\"content\":\"line1\\nline2\\n\"}");
   assert(w.ok);
   auto rd = r.invoke("read", "{\"path\":\"/tmp/pi_tool_t.txt\"}");

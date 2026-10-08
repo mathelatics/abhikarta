@@ -2,6 +2,8 @@
 #pragma once
 #include "context.hpp"
 #include <dirent.h>
+#include <iostream>
+#include <unordered_set>
 
 namespace pi {
 
@@ -40,6 +42,7 @@ inline SkillInfo parse_skill_md(const std::string& path) {
 class Skills {
 public:
   static void scan(ContextBuilder& ctx, const std::string& cwd) {
+    std::unordered_set<std::string> seen;
     for (auto& root : {home_dir() + "/.pi/agent/skills", cwd + "/.agents/skills"}) {
       DIR* d = opendir(root.c_str());
       if (!d) continue;
@@ -48,10 +51,20 @@ public:
         if (n == "." || n == "..") continue;
         std::string p = root + "/" + n;
         if (n.size() > 3 && n.substr(n.size()-3) == ".md") {
-          ctx.skills.push_back(parse_skill_md(p));
+          SkillInfo s = parse_skill_md(p);
+          if (s.name.empty() || s.description.empty()) { std::cerr << "pi: invalid skill metadata in " << p << "\n"; continue; }
+          if (!seen.insert(s.name).second) { std::cerr << "pi: duplicate skill name '" << s.name << "', skipping " << p << "\n"; continue; }
+          ctx.skills.push_back(s);
         } else {
           std::string inner = p + "/SKILL.md";
-          if (!read_file(inner).empty()) ctx.skills.push_back(parse_skill_md(inner));
+          if (!read_file(inner).empty()) {
+            SkillInfo s = parse_skill_md(inner);
+            if (s.name.empty() || s.description.empty()) { std::cerr << "pi: invalid skill metadata in " << inner << "\n"; continue; }
+            if (!seen.insert(s.name).second) { std::cerr << "pi: duplicate skill name '" << s.name << "', skipping " << inner << "\n"; continue; }
+            ctx.skills.push_back(s);
+          } else if (n.size() > 3 && n.substr(n.size()-3) != ".md" && n != "SKILL.md") {
+            std::cerr << "pi: ignoring non-skill entry " << p << "\n";
+          }
         }
       }
       closedir(d);

@@ -68,9 +68,12 @@ public:
     for (auto* n : chain) {
       if (n->type == "message") msgs.push_back(n->msg);
       else if (n->type == "compaction" || n->type == "summary") {
+        // Replace all older history in msgs with this compaction summary.
+        std::vector<Message> replacement;
         Message m; m.role = "user";
         m.text = "[Context summary]\n" + n->summary_json;
-        msgs.push_back(m);
+        replacement.push_back(m);
+        msgs.swap(replacement);
       }
     }
     return msgs;

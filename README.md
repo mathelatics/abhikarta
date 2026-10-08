@@ -1,6 +1,19 @@
 # abhikarta
 agent for any one
 
+## Long-running prompt examples
+
+1. `Create a small Django-like app skeleton for a blog, add models/views/templates, run it, create a post, then read the template files and summarize what changed.`
+2. `Write a Python project with modules for math operations, then create pytest tests for each module, run pytest, fix failures iteratively, and report the final test summary.`
+3. `Write a toy JSON parser in C++ from scratch, compile it with g++, write a small test script that checks several JSON inputs, and iterate until it compiles and passes.`
+4. `Implement an async web scraper using Python/requests/BeautifulSoup that fetches a news site, parses links/titles, saves a CSV, then read the CSV head and summarize the data.`
+5. `Create a CLI Python tool that counts word frequencies in a folder of text files, run it on some sample files, fix any errors, and show the top counts.`
+6. `Generate a small Bash script that backs up a directory, encrypts the archive with openssl, and restores it to a temp dir, then run and verify the restoration.`
+7. `Write a README-style documentation generator script that walks the codebase, reads each file header/comment, builds a summary Markdown file, then show the generated summary.`
+8. `Code a tiny calculator compiler or evaluator (infix expressions), compile/run it against several cases, fix bugs, and show all test outputs.`
+9. `Set up a simple SQLite database with Python, create tables for users/orders, insert sample rows, run several queries, and summarize the results.`
+10. `Write a script that reads the current git log, computes commit author counts and file change counts, saves a report, then render the report as Markdown.`
+
 ## Multi-step prompt ideas
 
 1. `Write a python script /tmp/fib.py that prints the first 20 fibonacci numbers, then use bash to run it, read its output, and tell me the sum of all printed numbers.`

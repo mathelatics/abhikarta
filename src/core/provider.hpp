@@ -7,6 +7,9 @@
 #include <sstream>
 #include <iostream>
 #include <map>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 namespace pi {
 
@@ -19,6 +22,7 @@ struct ProviderConfig {
 
 struct ChatResponse {
   std::string text;
+  std::string reasoning;
   std::vector<ToolCall> tool_calls;
   Usage usage;
   bool ok = false;
@@ -92,7 +96,10 @@ public:
       // Nemotron / reasoning models stream chain-of-thought in reasoning_content.
       // Capture it but do NOT treat it as the answer text.
       std::string rc = ju::str(dl, "reasoning_content");
-      if (!rc.empty()) a.reasoning += rc;
+      if (!rc.empty()) {
+        a.reasoning += rc;
+        std::cerr << "\x1b[2m" << rc << "\x1b[0m" << std::flush;
+      }
       std::string c = ju::str(dl, "content");
       if (!c.empty()) { a.text += c; out_ << c << std::flush; }
       auto* tca = ju::arr(dl, "tool_calls");
@@ -105,7 +112,10 @@ public:
           std::string nm = ju::str(fn, "name");
           if (!nm.empty()) slot.name += nm;
           std::string ar = ju::str(fn, "arguments");
-          if (!ar.empty()) a.tc_args[idx] += ar;
+          if (!ar.empty()) {
+            a.tc_args[idx] += ar;
+            std::cerr << "." << std::flush;
+          }
         }
       }
     }
@@ -126,9 +136,10 @@ public:
     body << "{\"model\":" << ju::q(cfg_.model)
          << ",\"messages\":" << messages_json(msgs)
          << ",\"stream\":true,\"temperature\":0.2"
+         << ",\"stream_options\":{\"include_usage\":true}"
          << ",\"max_tokens\":" << (nemotron ? 8192 : 4096);
     if (nemotron)
-      body << ",\"reasoning\":{\"exclude\":true,\"effort\":\"high\"}";
+      body << ",\"reasoning\":{\"exclude\":false,\"effort\":\"high\"}";
     if (!tools_json.empty() && tools_json != "[]")
       body << ",\"tools\":" << tools_json << ",\"tool_choice\":\"auto\"";
     body << "}";
@@ -137,29 +148,70 @@ public:
     if (!cfg_.api_key.empty()) h.emplace("Authorization", "Bearer " + cfg_.api_key);
     h.emplace("Accept", "text/event-stream");
 
-    Acc acc;
-    std::string line_buf;   // per-request buffer (no stale state across calls)
-    auto res = cli.Post((prefix + "/chat/completions").c_str(), h,
-                        body.str(), "application/json",
-                        [&](const char* data, size_t len) -> bool {
-      line_buf.append(data, len);
-      size_t nl;
-      while ((nl = line_buf.find('\n')) != std::string::npos) {
-        std::string line = line_buf.substr(0, nl);
-        line_buf.erase(0, nl + 1);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.rfind("data:", 0) != 0) continue;
-        std::string payload = line.substr(5);
-        if (!payload.empty() && payload[0] == ' ') payload.erase(0, 1);
-        feed_payload(payload, acc);
+    // RAII spinner: every early-return/error path must join, otherwise the
+    // joinable std::thread destructor calls std::terminate and kills the
+    // whole process mid-turn (session file then has no assistant node).
+    struct Spinner {
+      std::atomic<bool> stop{false};
+      std::thread th;
+      Spinner() : th([this]() {
+        const char spin[] = "-\\|/";
+        int i = 0;
+        while (!stop.load()) {
+          std::cerr << "\x1b[2mThinking " << spin[i++ % 4] << "\x1b[0m\r" << std::flush;
+          std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        }
+        std::cerr << "               \r" << std::flush;
+      }) {}
+      ~Spinner() {
+        stop.store(true);
+        if (th.joinable()) th.join();
       }
-      return true;
-    });
+      void arrived() { stop.store(true); }
+    } spinner;
 
-    if (!res) { r.error = "HTTP request failed: " + httplib::to_string(res.error()); return r; }
-    if (res->status >= 400) { r.error = "HTTP " + std::to_string(res->status) + ": " + res->body; return r; }
+    int attempts = 0;
+    bool success = false;
+    Acc acc;
+    for (attempts = 0; attempts < 2 && !success; ++attempts) {
+      acc = Acc{};
+      std::string line_buf;   // per-request buffer (no stale state across calls)
+      auto res = cli.Post((prefix + "/chat/completions").c_str(), h,
+                          body.str(), "application/json",
+                          [&](const char* data, size_t len) -> bool {
+        line_buf.append(data, len);
+        size_t nl;
+        while ((nl = line_buf.find('\n')) != std::string::npos) {
+          std::string line = line_buf.substr(0, nl);
+          line_buf.erase(0, nl + 1);
+          if (!line.empty() && line.back() == '\r') line.pop_back();
+          if (line.rfind("data:", 0) != 0) continue;
+          std::string payload = line.substr(5);
+          if (!payload.empty() && payload[0] == ' ') payload.erase(0, 1);
+          feed_payload(payload, acc);
+          if (!acc.text.empty() || !acc.reasoning.empty()) spinner.arrived();
+        }
+        return true;
+      });
+
+      if (!res) {
+        if (attempts + 1 < 2) continue;   // transient network; retry once
+        r.error = "HTTP request failed: " + httplib::to_string(res.error());
+        return r;                          // Spinner dtor joins safely
+      }
+      if (res->status >= 400) {
+        // 429/5xx may be transient; retry once, otherwise fail
+        if ((res->status == 429 || res->status >= 500) && attempts + 1 < 2) continue;
+        r.error = "HTTP " + std::to_string(res->status) + ": " + res->body;
+        return r;                          // Spinner dtor joins safely
+      }
+      success = true;
+    }
+
+    spinner.arrived();
 
     r.text = acc.text;
+    r.reasoning = acc.reasoning;
     // Fallback: if the model only produced reasoning (e.g. server ignored the
     // exclude flag), salvage a clean answer by stripping the thinking block.
     if (r.text.empty() && !acc.reasoning.empty()) {
@@ -182,6 +234,7 @@ public:
   }
 
   const ProviderConfig& cfg() const { return cfg_; }
+  void set_model(const std::string& m) { cfg_.model = m; }
 
 private:
   ProviderConfig cfg_;
